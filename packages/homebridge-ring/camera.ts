@@ -4,6 +4,7 @@ import type { RingCamera } from 'ring-client-api'
 import { BaseDataAccessory } from './base-data-accessory.ts'
 import { filter, map, switchMap, throttleTime } from 'rxjs/operators'
 import { CameraSource } from './camera-source.ts'
+import { RingRecordingDelegate } from './recording-delegate.ts'
 import type { PlatformAccessory } from 'homebridge'
 import { TargetValueTimer } from './target-value-timer.ts'
 import { delay, logError, logInfo } from 'ring-client-api/util'
@@ -12,6 +13,7 @@ import { firstValueFrom } from 'rxjs'
 export class Camera extends BaseDataAccessory<RingCamera> {
   private inHomeDoorbellStatus: boolean | undefined
   private cameraSource
+  private recordingDelegate?: RingRecordingDelegate
 
   public readonly device
   public readonly accessory
@@ -27,7 +29,17 @@ export class Camera extends BaseDataAccessory<RingCamera> {
     this.device = device
     this.accessory = accessory
     this.config = config
-    this.cameraSource = new CameraSource(this.device)
+
+    // Create recording delegate if HKSV is enabled
+    if (config.enableHksv) {
+      this.recordingDelegate = new RingRecordingDelegate(device)
+      logInfo(`HomeKit Secure Video enabled for ${device.name}`)
+    }
+
+    this.cameraSource = new CameraSource(this.device, {
+      hksv: config.enableHksv,
+      recordingDelegate: this.recordingDelegate,
+    })
 
     if (!hap.CameraController) {
       const error =
@@ -54,19 +66,35 @@ export class Camera extends BaseDataAccessory<RingCamera> {
     })
 
     if (!config.hideCameraMotionSensor) {
-      this.registerObservableCharacteristic({
-        characteristicType: Characteristic.MotionDetected,
-        serviceType: Service.MotionSensor,
-        onValue: device.onMotionDetected.pipe(
-          switchMap((motion) => {
-            if (!motion) {
-              return Promise.resolve(false)
+      if (config.enableHksv) {
+        // For HKSV, use the motion sensor managed by the CameraController
+        // We need to update its MotionDetected characteristic when motion is detected
+        device.onMotionDetected.subscribe((motion) => {
+          const motionService = this.cameraSource.controller.motionService
+          if (motionService) {
+            motionService
+              .getCharacteristic(Characteristic.MotionDetected)
+              .updateValue(motion)
+            if (motion) {
+              logInfo(`${device.name} Detected Motion (HKSV)`)
             }
+          }
+        })
+      } else {
+        this.registerObservableCharacteristic({
+          characteristicType: Characteristic.MotionDetected,
+          serviceType: Service.MotionSensor,
+          onValue: device.onMotionDetected.pipe(
+            switchMap((motion) => {
+              if (!motion) {
+                return Promise.resolve(false)
+              }
 
-            return this.loadSnapshotForEvent('Detected Motion', true)
-          }),
-        ),
-      })
+              return this.loadSnapshotForEvent('Detected Motion', true)
+            }),
+          ),
+        })
+      }
     }
 
     if (device.isDoorbot) {

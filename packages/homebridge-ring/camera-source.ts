@@ -7,9 +7,11 @@ import {
   RtpSplitter,
 } from '@homebridge/camera-utils'
 import type {
+  CameraRecordingDelegate,
   CameraStreamingDelegate,
   PrepareStreamCallback,
   PrepareStreamRequest,
+  Resolution,
   SnapshotRequest,
   SnapshotRequestCallback,
   StartStreamRequest,
@@ -17,10 +19,13 @@ import type {
   StreamRequestCallback,
 } from 'homebridge'
 import {
+  AudioRecordingCodecType,
+  AudioRecordingSamplerate,
   AudioStreamingCodecType,
   AudioStreamingSamplerate,
   H264Level,
   H264Profile,
+  MediaContainerType,
   SRTPCryptoSuites,
 } from 'homebridge'
 import { logDebug, logError, logInfo } from 'ring-client-api/util'
@@ -324,18 +329,21 @@ class StreamingSessionWrapper {
   }
 }
 
+export interface CameraSourceOptions {
+  hksv?: boolean
+  recordingDelegate?: CameraRecordingDelegate
+}
+
 export class CameraSource implements CameraStreamingDelegate {
   public controller
   private sessions: { [sessionKey: string]: StreamingSessionWrapper } = {}
   private cachedSnapshot?: Buffer
   private ringCamera
 
-  constructor(ringCamera: RingCamera) {
+  constructor(ringCamera: RingCamera, options: CameraSourceOptions = {}) {
     this.ringCamera = ringCamera
-    this.controller = new hap.CameraController({
-      cameraStreamCount: 10,
-      delegate: this,
-      streamingOptions: {
+
+    const streamingOptions = {
         supportedCryptoSuites: [SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80],
         video: {
           resolutions: [
@@ -349,7 +357,7 @@ export class CameraSource implements CameraStreamingDelegate {
             [320, 240, 30],
             [320, 240, 15], // Apple Watch requires this configuration
             [320, 180, 30],
-          ],
+          ] as Resolution[],
           codec: {
             profiles: [H264Profile.BASELINE],
             levels: [H264Level.LEVEL3_1],
@@ -373,6 +381,57 @@ export class CameraSource implements CameraStreamingDelegate {
           ],
         },
       },
+      // Configure HKSV recording options if enabled
+      recording =
+        options.hksv && options.recordingDelegate
+          ? {
+              options: {
+                prebufferLength: 4000, // 4 seconds prebuffer
+                mediaContainerConfiguration: {
+                  type: MediaContainerType.FRAGMENTED_MP4,
+                  fragmentLength: 4000, // 4 second fragments
+                },
+                video: {
+                  type: 0 as const, // H.264
+                  parameters: {
+                    profiles: [
+                      H264Profile.BASELINE,
+                      H264Profile.MAIN,
+                      H264Profile.HIGH,
+                    ],
+                    levels: [H264Level.LEVEL3_1, H264Level.LEVEL4_0],
+                  },
+                  resolutions: [
+                    [1920, 1080, 30],
+                    [1280, 720, 30],
+                  ] as [number, number, number][],
+                },
+                audio: {
+                  codecs: [
+                    {
+                      type: AudioRecordingCodecType.AAC_LC,
+                      samplerate: [
+                        AudioRecordingSamplerate.KHZ_24,
+                        AudioRecordingSamplerate.KHZ_48,
+                      ],
+                    },
+                  ],
+                },
+              },
+              delegate: options.recordingDelegate,
+            }
+          : undefined
+
+    this.controller = new hap.CameraController({
+      cameraStreamCount: options.hksv ? 1 : 10, // HKSV cameras only support 1 stream
+      delegate: this,
+      streamingOptions,
+      recording,
+      sensors: options.hksv
+        ? {
+            motion: true, // Let the controller manage the motion sensor for HKSV
+          }
+        : undefined,
     })
   }
 

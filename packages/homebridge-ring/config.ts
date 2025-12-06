@@ -23,6 +23,7 @@ export interface RingPlatformConfig extends RingApiOptions {
   onlyDeviceTypes?: string[]
   showPanicButtons?: boolean
   disableLogs?: boolean
+  enableHksv?: boolean
 }
 
 export function updateHomebridgeConfig(
